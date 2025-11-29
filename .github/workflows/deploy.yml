@@ -1,0 +1,99 @@
+# GitHub Actions – CI/CD para
+# • Build de Unity (Android)
+# • Deploy de Azure Functions (.NET 8)
+# • Deploy Infra (Bicep)
+#
+# Requisitos:
+# 1. Secrets en GitHub:
+#    - AZURE_CREDENTIALS → JSON del Service Principal
+#    - UNITY_LICENSE → Licencia de Unity (GameCI)
+# 2. Archivo infra/main.bicep en el repo
+# 3. Function App existente o creada por Bicep
+
+name: CI-CD XipeLabs Simulador
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build-unity-android:
+    name: Build Unity (Android)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Librerías Unity
+        uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-${{ hashFiles('**/*.cs') }}
+          restore-keys: |
+            Library-
+
+      - name: Build Unity (Android)
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+        with:
+          targetPlatform: Android
+          unityVersion: 2022.3.22f1
+          projectPath: ./unity
+
+      - name: Upload APK como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: XipeLabs-Android
+          path: build/Android/*.apk
+
+  deploy-infra:
+    name: Deploy Infra (Bicep)
+    runs-on: ubuntu-latest
+    needs: build-unity-android
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy Infra (Bicep)
+        run: |
+          az group create -n rg-xipelabs -l eastus
+          az deployment group create \
+            -g rg-xipelabs \
+            -f infra/main.bicep \
+            -p namePrefix=xipelabs-ci
+
+  deploy-functions:
+    name: Deploy Azure Functions
+    runs-on: ubuntu-latest
+    needs: deploy-infra
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore + Build
+        run: |
+          cd api/Xipe.Api
+          dotnet restore
+          dotnet publish -c Release -o publish
+
+      - name: Deploy to Azure Functions
+        uses: azure/functions-action@v1
+        with:
+          app-name: xipelabs-ci-api
+          package: api/Xipe.Api/publish
